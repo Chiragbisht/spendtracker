@@ -1,0 +1,1 @@
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS is_ignored BOOLEAN DEFAULT false;

@@ -28,10 +28,10 @@ serve(async (req) => {
         { global: { headers: { Authorization: authHeader } } }
       );
       
-      const { data: { user }, error: userErr } = await supabaseClient.auth.getUser();
+      const { data: { user }, error: userErr } = await supabaseClient.auth.getUser(token);
       if (userErr || !user) {
         console.error("Auth error:", userErr);
-        throw new Error("Invalid user token");
+        throw new Error("Invalid user token: " + (userErr?.message || "No user found"));
       }
       targetUserId = user.id;
     }
@@ -82,9 +82,9 @@ serve(async (req) => {
         
         const accessToken = tokenData.access_token;
 
-        // Fetch up to 100 emails
+        // Fetch up to 20 emails
         const searchQuery = encodeURIComponent("receipt OR invoice OR order OR paid OR booking OR debited OR transaction OR spent OR UPI OR Swiggy OR Zomato OR Amazon OR Flipkart OR HDFC OR SBI");
-        const messagesRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${searchQuery}&maxResults=100`, {
+        const messagesRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${searchQuery}&maxResults=20`, {
           headers: { Authorization: `Bearer ${accessToken}` }
         });
         const messagesData = await messagesRes.json();
@@ -106,47 +106,48 @@ serve(async (req) => {
           });
           const emailData = await emailRes.json();
           
-          const emailSnippet = emailData.snippet;
-          const subjectHeader = emailData.payload.headers.find((h: any) => h.name === 'Subject')?.value || '';
-          const dateHeader = emailData.payload.headers.find((h: any) => h.name === 'Date')?.value || '';
-
-          const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
-          if (!geminiApiKey) throw new Error("Gemini API key missing.");
-
-          const prompt = `
-            Analyze this email snippet and subject line to determine if it is a purchase receipt, invoice, or expense.
-            If it is, extract the merchant name, total amount, currency (e.g. INR), and a general category.
-            
-            CRITICAL RULES:
-            1. If you cannot confidently find a monetary amount, return {"is_expense": false}.
-            2. If the email is about a CREDIT CARD BILL PAYMENT or REPAYMENT (e.g., from CRED, or a bank acknowledging a credit card bill payment), return {"is_expense": false}. We only want to track actual purchases, to avoid double-counting.
-            
-            Subject: ${subjectHeader}
-            Snippet: ${emailSnippet}
-            
-            Respond ONLY with a valid JSON object matching this exact schema, with no markdown formatting:
-            {
-              "is_expense": boolean,
-              "amount": number (or null),
-              "currency": string (or null),
-              "merchant": string (or null),
-              "category": string (or null)
-            }
-          `;
-
-          const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${geminiApiKey}`, {
-             method: 'POST',
-             headers: { 'Content-Type': 'application/json' },
-             body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-          });
+          let snippet = emailData.snippet || "";
+          const subjectHeader = emailData.payload?.headers?.find((h: any) => h.name === 'Subject')?.value || '';
+          const dateHeader = emailData.payload?.headers?.find((h: any) => h.name === 'Date')?.value || '';
           
-          const geminiData = await geminiRes.json();
-          try {
-            const textResponse = geminiData.candidates[0].content.parts[0].text;
-            const jsonStr = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-            const parsed = JSON.parse(jsonStr);
+          if (!snippet || snippet.length < 5) continue;
 
-            if (parsed.is_expense && parsed.amount) {
+          // Pre-filter using Regex to only send highly likely receipts to Gemini
+          const expenseRegex = /(rs\.?|inr|₹|\$|usd|amount|total|paid|debited|spent|transaction)\s*[:\-]?\s*[\d,]+(\.\d{1,2})?/i;
+          const isLikelyExpense = expenseRegex.test(snippet) || expenseRegex.test(subjectHeader);
+          
+          if (!isLikelyExpense) continue;
+
+          try {
+            const prompt = `Extract expense details from this email. Return a JSON object with: 
+              "amount" (number), "currency" (string like "USD" or "INR"), "merchant" (string), "category" (string), "date" (YYYY-MM-DD).
+              If it's not an expense, return { "amount": null }.
+              Subject: "${subjectHeader}"
+              Date: "${dateHeader}"
+              Snippet: "${snippet}"`;
+
+            const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${Deno.env.get('GEMINI_API_KEY')}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            });
+            const aiData = await geminiRes.json();
+            
+            // Wait 1 second between requests to respect API rate limits
+            await new Promise(r => setTimeout(r, 1000));
+
+            if (aiData.error) {
+               console.error("Gemini API Error:", aiData.error);
+               continue;
+            }
+
+            const text = aiData.candidates[0].content.parts[0].text;
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) continue;
+            
+            const parsed = JSON.parse(jsonMatch[0]);
+            
+            if (parsed.amount) {
               expensesToInsert.push({
                 user_id: account.user_id,
                 linked_account_id: account.id,
@@ -154,12 +155,12 @@ serve(async (req) => {
                 currency: parsed.currency || 'USD',
                 merchant: parsed.merchant || 'Unknown',
                 category: parsed.category || 'Other',
-                date: new Date(dateHeader).toISOString(),
+                date: parsed.date || new Date().toISOString().split('T')[0],
                 email_message_id: msg.id
               });
             }
           } catch (e) {
-            console.error("Failed to parse Gemini response for email", msg.id);
+            console.error("Failed to parse email", msg.id, e);
           }
         }
       } catch (err) {
@@ -171,7 +172,7 @@ serve(async (req) => {
     if (expensesToInsert.length > 0) {
       const { error: insertErr } = await adminClient
         .from('expenses')
-        .insert(expensesToInsert);
+        .upsert(expensesToInsert, { onConflict: 'email_message_id', ignoreDuplicates: true });
         
       if (insertErr) throw insertErr;
     }
@@ -185,10 +186,11 @@ serve(async (req) => {
       status: 200,
     })
 
-  } catch (error: any) {
-    return new Response(JSON.stringify({ error: error.message }), {
+  } catch (err: any) {
+    console.error("Sync Error:", err);
+    return new Response(JSON.stringify({ error: err.message || "Unknown error occurred", details: err.stack }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    })
+      status: 200,
+    });
   }
 })

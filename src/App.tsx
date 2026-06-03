@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Mail, Settings, LogOut, Search, Plus, CreditCard, Loader2, ExternalLink, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Mail, Settings, LogOut, Search, Plus, CreditCard, Loader2, ExternalLink, RefreshCw, ChevronLeft, ChevronRight, X, EyeOff, Eye } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { supabase } from './lib/supabase';
 import type { User } from '@supabase/supabase-js';
@@ -22,6 +22,8 @@ export default function App() {
   const [currentMonthIndex, setCurrentMonthIndex] = useState(0); // 0 is latest month
 
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [newExpense, setNewExpense] = useState({ amount: '', merchant: '', category: '', date: new Date().toISOString().split('T')[0] });
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -78,6 +80,7 @@ export default function App() {
       // Trigger the backend Edge Function (JWT is passed automatically)
       const { data, error } = await supabase.functions.invoke('sync-emails');
       if (error) throw error;
+      if (data?.error) throw new Error(data.error);
       
       if (!silent && data?.new_expenses_found > 0) alert(`Sync complete! Found ${data.new_expenses_found} new expenses.`);
       else if (!silent) alert("Sync complete! No new expenses found right now.");
@@ -145,6 +148,39 @@ export default function App() {
     setIsLoadingExpenses(false);
   };
 
+  const handleAddExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !newExpense.amount || !newExpense.merchant) return;
+    
+    // Create a deterministic UUID-like string or just let Supabase auto-generate if we omit ID
+    // We will let Supabase auto-generate id.
+    const { error } = await supabase.from('expenses').insert({
+      user_id: user.id,
+      amount: Number(newExpense.amount),
+      merchant: newExpense.merchant,
+      category: newExpense.category || 'Manual',
+      date: new Date(newExpense.date).toISOString()
+    });
+    
+    if (error) alert("Error adding expense: " + error.message);
+    else {
+      setIsAddModalOpen(false);
+      setNewExpense({ amount: '', merchant: '', category: '', date: new Date().toISOString().split('T')[0] });
+      fetchExpenses();
+    }
+  };
+
+  const toggleIgnoreExpense = async (id: string, currentStatus: boolean) => {
+    // Optimistic UI update
+    setExpenses(prev => prev.map(exp => exp.id === id ? { ...exp, is_ignored: !currentStatus } : exp));
+    
+    const { error } = await supabase.from('expenses').update({ is_ignored: !currentStatus }).eq('id', id);
+    if (error) {
+      alert("Failed to update tracking status.");
+      fetchExpenses(); // revert
+    }
+  };
+
   const formatINR = (amount: number) => {
     return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(amount);
   };
@@ -199,10 +235,12 @@ export default function App() {
     return d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }) === selectedMonthString;
   });
 
-  const totalSpend = monthlyData.reduce((sum, exp) => sum + Number(exp.amount), 0);
+  const trackedMonthlyData = monthlyData.filter(exp => !exp.is_ignored);
+
+  const totalSpend = trackedMonthlyData.reduce((sum, exp) => sum + Number(exp.amount), 0);
 
   // Group filtered data by day for the chart
-  const chartData = monthlyData.reduce((acc, exp) => {
+  const chartData = trackedMonthlyData.reduce((acc, exp) => {
     const date = new Date(exp.date).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
     const existing = acc.find((item: any) => item.name === date);
     if (existing) {
@@ -252,16 +290,27 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 p-8 overflow-y-auto">
-        <header className="flex justify-between items-center mb-10">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Overview</h1>
-            <p className="text-sm text-slate-500 mt-1">Welcome back, {user.user_metadata.full_name?.split(' ')[0] || 'User'}</p>
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto">
+        <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-4">
+          <div className="flex justify-between w-full md:w-auto items-center">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Overview</h1>
+              <p className="text-sm text-slate-500 mt-1">Welcome back, {user.user_metadata.full_name?.split(' ')[0] || 'User'}</p>
+            </div>
+            <button onClick={handleLogout} className="md:hidden p-2 text-slate-400 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors">
+              <LogOut className="w-5 h-5" />
+            </button>
           </div>
           
-          <div className="flex items-center gap-3">
-             <button onClick={handleLinkAnotherAccount} className="bg-slate-900 text-white px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-slate-800 transition-colors shadow-sm">
-               <Plus className="w-4 h-4" /> Link Gmail Account
+          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+             <button onClick={() => handleSync(false)} disabled={isSyncing} className="flex-1 md:flex-none justify-center bg-white border border-slate-200 text-slate-700 px-3 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-50">
+               <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} /> <span className="hidden sm:inline">{isSyncing ? 'Syncing' : 'Sync'}</span>
+             </button>
+             <button onClick={() => setIsAddModalOpen(true)} className="flex-1 md:flex-none justify-center bg-indigo-600 text-white px-3 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
+               <Plus className="w-4 h-4" /> <span className="hidden sm:inline">Add</span>
+             </button>
+             <button onClick={handleLinkAnotherAccount} className="flex-1 md:flex-none justify-center bg-slate-900 text-white px-3 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-slate-800 transition-colors shadow-sm">
+               <Mail className="w-4 h-4" /> <span className="hidden sm:inline">Link</span>
              </button>
           </div>
         </header>
@@ -338,29 +387,29 @@ export default function App() {
             <h2 className="text-sm font-semibold text-slate-900">Detailed Expenses</h2>
           </div>
           
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-[0_2px_10px_rgb(0,0,0,0.02)] overflow-hidden">
-            <table className="w-full text-sm text-left">
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-[0_2px_10px_rgb(0,0,0,0.02)] overflow-x-auto">
+            <table className="w-full text-sm text-left min-w-[600px]">
               <thead className="bg-slate-50/50 text-slate-500 font-medium">
                 <tr>
                   <th className="px-6 py-4 border-b border-slate-100">Merchant / Source</th>
                   <th className="px-6 py-4 border-b border-slate-100">Category</th>
                   <th className="px-6 py-4 border-b border-slate-100">Date</th>
                   <th className="px-6 py-4 border-b border-slate-100 text-right">Amount</th>
-                  <th className="px-6 py-4 border-b border-slate-100 text-center">Receipt</th>
+                  <th className="px-6 py-4 border-b border-slate-100 text-center">Track</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {monthlyData.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-slate-50/50 transition-colors group">
+                  <tr key={tx.id} className={`hover:bg-slate-50/50 transition-colors group ${tx.is_ignored ? 'opacity-50 grayscale' : ''}`}>
                     <td className="px-6 py-4">
                        <div className="font-medium text-slate-900 flex items-center gap-3">
                          <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-xs text-slate-500 group-hover:bg-white transition-colors">
                            {tx.merchant[0]}
                          </div>
-                         {tx.merchant}
+                         <span className={tx.is_ignored ? 'line-through text-slate-500' : ''}>{tx.merchant}</span>
                        </div>
                        <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
-                          <Mail className="w-3 h-3" /> {tx.linked_accounts?.email_address || 'Unknown Account'}
+                          <Mail className="w-3 h-3" /> {tx.linked_accounts?.email_address || 'Manual Entry'}
                        </div>
                     </td>
                     <td className="px-6 py-4 text-slate-500">
@@ -372,20 +421,29 @@ export default function App() {
                        {new Date(tx.date).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' })}
                     </td>
                     <td className="px-6 py-4 text-right font-medium text-slate-900">
-                       {formatINR(Number(tx.amount))}
+                       <span className={tx.is_ignored ? 'line-through text-slate-500' : ''}>{formatINR(Number(tx.amount))}</span>
                     </td>
                     <td className="px-6 py-4 text-center">
-                       {tx.email_message_id && (
-                          <a 
-                            href={`https://mail.google.com/mail/u/0/#all/${tx.email_message_id}`} 
-                            target="_blank" 
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center justify-center w-8 h-8 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-colors"
-                            title="View Original Email"
-                          >
-                             <ExternalLink className="w-4 h-4" />
-                          </a>
-                       )}
+                       <div className="flex items-center justify-center gap-2">
+                         <button 
+                           onClick={() => toggleIgnoreExpense(tx.id, tx.is_ignored)}
+                           className="inline-flex items-center justify-center w-8 h-8 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-colors"
+                           title={tx.is_ignored ? "Start Tracking" : "Stop Tracking"}
+                         >
+                           {tx.is_ignored ? <EyeOff className="w-4 h-4 text-red-500" /> : <Eye className="w-4 h-4" />}
+                         </button>
+                         {tx.email_message_id && (
+                            <a 
+                              href={`https://mail.google.com/mail/u/0/#all/${tx.email_message_id}`} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center justify-center w-8 h-8 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-colors"
+                              title="View Original Email"
+                            >
+                               <ExternalLink className="w-4 h-4" />
+                            </a>
+                         )}
+                       </div>
                     </td>
                   </tr>
                 ))}
@@ -399,6 +457,41 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Add Expense Modal */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+            <div className="flex justify-between items-center p-6 border-b border-slate-100">
+              <h2 className="text-xl font-semibold text-slate-900">Add Manual Expense</h2>
+              <button onClick={() => setIsAddModalOpen(false)} className="text-slate-400 hover:text-slate-900">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleAddExpense} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Amount (INR)</label>
+                <input type="number" step="0.01" required value={newExpense.amount} onChange={e => setNewExpense({...newExpense, amount: e.target.value})} className="w-full border border-slate-200 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-indigo-600 focus:border-transparent outline-none" placeholder="e.g. 1500" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Merchant</label>
+                <input type="text" required value={newExpense.merchant} onChange={e => setNewExpense({...newExpense, merchant: e.target.value})} className="w-full border border-slate-200 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-indigo-600 focus:border-transparent outline-none" placeholder="e.g. Starbucks" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Category</label>
+                <input type="text" value={newExpense.category} onChange={e => setNewExpense({...newExpense, category: e.target.value})} className="w-full border border-slate-200 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-indigo-600 focus:border-transparent outline-none" placeholder="e.g. Food" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Date</label>
+                <input type="date" required value={newExpense.date} onChange={e => setNewExpense({...newExpense, date: e.target.value})} className="w-full border border-slate-200 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-indigo-600 focus:border-transparent outline-none" />
+              </div>
+              <button type="submit" className="w-full bg-indigo-600 text-white font-medium py-2.5 rounded-lg hover:bg-indigo-700 transition-colors mt-2">
+                Save Expense
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
