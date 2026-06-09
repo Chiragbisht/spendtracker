@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Mail, Settings, LogOut, Search, Plus, CreditCard, Loader2, ExternalLink, RefreshCw, ChevronLeft, ChevronRight, X, EyeOff, Eye } from 'lucide-react';
+import { Mail, Settings, LogOut, Search, Plus, CreditCard, Loader2, ExternalLink, RefreshCw, ChevronLeft, ChevronRight, X, EyeOff, Eye, Trash2, Upload } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { supabase } from './lib/supabase';
 import type { User } from '@supabase/supabase-js';
@@ -24,6 +24,8 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [newExpense, setNewExpense] = useState({ amount: '', merchant: '', category: '', date: new Date().toISOString().split('T')[0] });
+  const [isUploading, setIsUploading] = useState(false);
+  const [expenseToDelete, setExpenseToDelete] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -170,6 +172,44 @@ export default function App() {
     }
   };
 
+  const confirmDelete = async () => {
+    if (!expenseToDelete) return;
+    const { error } = await supabase.from('expenses').delete().eq('id', expenseToDelete);
+    if (error) alert("Failed to delete expense: " + error.message);
+    else fetchExpenses();
+    setExpenseToDelete(null);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    try {
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64String = (reader.result as string).split(',')[1];
+        const mimeType = file.type;
+
+        const { data, error } = await supabase.functions.invoke('parse-receipt', {
+          body: { imageBase64: base64String, mimeType }
+        });
+
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+
+        alert(`Successfully extracted ${data.expenses_added} expense(s)!`);
+        fetchExpenses();
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      alert("Error parsing receipt: " + err.message);
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
+    }
+  };
+
   const toggleIgnoreExpense = async (id: string, currentStatus: boolean) => {
     // Optimistic UI update
     setExpenses(prev => prev.map(exp => exp.id === id ? { ...exp, is_ignored: !currentStatus } : exp));
@@ -309,6 +349,10 @@ export default function App() {
              <button onClick={() => setIsAddModalOpen(true)} className="flex-1 md:flex-none justify-center bg-indigo-600 text-white px-3 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-indigo-700 transition-colors shadow-sm">
                <Plus className="w-4 h-4" /> <span className="hidden sm:inline">Add</span>
              </button>
+             <input type="file" accept="image/*" className="hidden" id="receipt-upload" onChange={handleFileUpload} disabled={isUploading} />
+             <label htmlFor="receipt-upload" className={`flex-1 md:flex-none justify-center bg-white border border-slate-200 text-slate-700 px-3 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-slate-50 transition-colors shadow-sm cursor-pointer ${isUploading ? 'opacity-50 cursor-not-allowed' : ''}`}>
+               <Upload className={`w-4 h-4 ${isUploading ? 'animate-bounce' : ''}`} /> <span className="hidden sm:inline">{isUploading ? 'Extracting...' : 'Upload'}</span>
+             </label>
              <button onClick={handleLinkAnotherAccount} className="flex-1 md:flex-none justify-center bg-slate-900 text-white px-3 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-slate-800 transition-colors shadow-sm">
                <Mail className="w-4 h-4" /> <span className="hidden sm:inline">Link</span>
              </button>
@@ -443,6 +487,13 @@ export default function App() {
                                <ExternalLink className="w-4 h-4" />
                             </a>
                          )}
+                         <button 
+                           onClick={() => setExpenseToDelete(tx.id)}
+                           className="inline-flex items-center justify-center w-8 h-8 rounded-full hover:bg-red-50 text-slate-400 hover:text-red-600 transition-colors"
+                           title="Delete Expense"
+                         >
+                           <Trash2 className="w-4 h-4" />
+                         </button>
                        </div>
                     </td>
                   </tr>
@@ -489,6 +540,19 @@ export default function App() {
                 Save Expense
               </button>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Delete Confirmation Modal */}
+      {expenseToDelete && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-6 text-center">
+            <h2 className="text-xl font-semibold text-slate-900 mb-2">Delete Expense?</h2>
+            <p className="text-slate-500 mb-6 text-sm">Are you sure you want to delete this expense? This action cannot be undone.</p>
+            <div className="flex gap-3">
+              <button onClick={() => setExpenseToDelete(null)} className="flex-1 bg-slate-100 text-slate-700 font-medium py-2.5 rounded-lg hover:bg-slate-200 transition-colors">Cancel</button>
+              <button onClick={confirmDelete} className="flex-1 bg-red-600 text-white font-medium py-2.5 rounded-lg hover:bg-red-700 transition-colors">Delete</button>
+            </div>
           </div>
         </div>
       )}
